@@ -231,6 +231,8 @@ private:
     static_assert(MAX_NEIGHBORHOOD_SIZE - 32 == 30, "");
     
     using bucket_hash = hopscotch_bucket_hash<StoreHash>;
+
+		std::atomic<bool> _lock;
     
 public:
     using value_type = ValueType;
@@ -241,6 +243,16 @@ public:
     hopscotch_bucket() noexcept: bucket_hash(), m_neighborhood_infos(0) {
         tsl_assert(empty());
     }
+		
+		void lock()
+		{
+			while(std::atomic_exchange_explicit(&_lock, true, std::memory_order_acquire));
+		};
+
+		void unlock()
+		{
+			 std::atomic_store_explicit(&_lock, false, std::memory_order_release);
+		};
     
     
     hopscotch_bucket(const hopscotch_bucket& bucket) 
