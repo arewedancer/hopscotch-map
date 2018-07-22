@@ -240,7 +240,7 @@ public:
                 typename smallest_type_for_min_bits<NeighborhoodSize + NB_RESERVED_BITS_IN_NEIGHBORHOOD>::type;
 
 
-    hopscotch_bucket() noexcept: bucket_hash(), m_neighborhood_infos(0) {
+    hopscotch_bucket() noexcept: bucket_hash(), m_neighborhood_infos(0), _lock(false) {
         tsl_assert(empty());
     }
 		
@@ -352,27 +352,35 @@ public:
     void set_value_of_empty_bucket(truncated_hash_type hash, Args&&... value_type_args) {
         tsl_assert(empty());
         
+				lock();
         ::new (static_cast<void*>(std::addressof(m_value))) value_type(std::forward<Args>(value_type_args)...);
         set_empty(false);
         this->set_hash(hash);
+				unlock();
     }
     
     void swap_value_into_empty_bucket(hopscotch_bucket& empty_bucket) {
         tsl_assert(empty_bucket.empty());
         if(!empty()) {
+						lock();
             ::new (static_cast<void*>(std::addressof(empty_bucket.m_value))) value_type(std::move(value()));
+						empty_bucket.lock();
             empty_bucket.copy_hash(*this);
             empty_bucket.set_empty(false);
+						empty_bucket.unlock();
             
             destroy_value();
             set_empty(true);
+						unlock();
         }
     }
     
     void remove_value() noexcept {
         if(!empty()) {
+						lock();
             destroy_value();
             set_empty(true);
+						unlock();
         }
     }
     
