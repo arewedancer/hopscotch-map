@@ -24,7 +24,7 @@
 #ifndef TSL_HOPSCOTCH_HASH_H
 #define TSL_HOPSCOTCH_HASH_H
 
-
+#include <atomic>
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -232,26 +232,32 @@ private:
     
     using bucket_hash = hopscotch_bucket_hash<StoreHash>;
 
-		std::atomic<bool> _lock;
     
 public:
+		std::atomic<bool> _lock[2]; // 0 - bucket lock; 1 - bitmap lock
     using value_type = ValueType;
     using neighborhood_bitmap = 
                 typename smallest_type_for_min_bits<NeighborhoodSize + NB_RESERVED_BITS_IN_NEIGHBORHOOD>::type;
 
 
-    hopscotch_bucket() noexcept: bucket_hash(), m_neighborhood_infos(0), _lock(false) {
+    hopscotch_bucket() noexcept: bucket_hash(), m_neighborhood_infos(0) {
         tsl_assert(empty());
+				std::fill(_lock, _lock+2, false);
     }
 		
-		void lock()
+		void lock(int lock_type)
 		{
-			while(std::atomic_exchange_explicit(&_lock, true, std::memory_order_acquire));
+			while(std::atomic_exchange_explicit(&_lock[lock_type], true, std::memory_order_acquire));
 		};
 
-		void unlock()
+		void unlock(int lock_type)
 		{
-			 std::atomic_store_explicit(&_lock, false, std::memory_order_release);
+			 std::atomic_store_explicit(&_lock[lock_type], false, std::memory_order_release);
+		};
+
+    bool isBusy(int lock_type) const noexcept
+		{
+			return _lock[lock_type].load();
 		};
     
     
@@ -262,7 +268,8 @@ public:
         if(!bucket.empty()) {
             ::new (static_cast<void*>(std::addressof(m_value))) value_type(bucket.value());
         }
-        
+				//reset locks
+        std::fill(_lock, _lock+2, false); 
         m_neighborhood_infos = bucket.m_neighborhood_infos;
     }
     
@@ -272,8 +279,10 @@ public:
     {
         if(!bucket.empty()) {
             ::new (static_cast<void*>(std::addressof(m_value))) value_type(std::move(bucket.value()));
-        }
+        };
         
+				//reset locks
+        std::fill(_lock, _lock+2, false); 
         m_neighborhood_infos = bucket.m_neighborhood_infos;
     }
      
@@ -288,6 +297,7 @@ public:
                 ::new (static_cast<void*>(std::addressof(m_value))) value_type(bucket.value());
             }
             
+						std::copy(_lock, _lock+2, bucket._lock);
             m_neighborhood_infos = bucket.m_neighborhood_infos;
         }
         
@@ -325,8 +335,10 @@ public:
     
     void toggle_neighbor_presence(std::size_t ineighbor) noexcept {
         tsl_assert(ineighbor <= NeighborhoodSize);
+				lock(1);
         m_neighborhood_infos = neighborhood_bitmap(
                                     m_neighborhood_infos ^ (1ull << (ineighbor + NB_RESERVED_BITS_IN_NEIGHBORHOOD)));
+				unlock(1);
     }
     
     bool check_neighbor_presence(std::size_t ineighbor) const noexcept {
@@ -352,45 +364,47 @@ public:
     void set_value_of_empty_bucket(truncated_hash_type hash, Args&&... value_type_args) {
         tsl_assert(empty());
         
-				lock();
         ::new (static_cast<void*>(std::addressof(m_value))) value_type(std::forward<Args>(value_type_args)...);
         set_empty(false);
         this->set_hash(hash);
-				unlock();
     }
     
     void swap_value_into_empty_bucket(hopscotch_bucket& empty_bucket) {
         tsl_assert(empty_bucket.empty());
         if(!empty()) {
-						lock();
+						lock(0);
             ::new (static_cast<void*>(std::addressof(empty_bucket.m_value))) value_type(std::move(value()));
-						empty_bucket.lock();
+						empty_bucket.lock(0);
             empty_bucket.copy_hash(*this);
             empty_bucket.set_empty(false);
-						empty_bucket.unlock();
+						empty_bucket.unlock(0);
             
             destroy_value();
             set_empty(true);
-						unlock();
+						unlock(0);
         }
     }
     
     void remove_value() noexcept {
         if(!empty()) {
-						lock();
+						lock(0);
             destroy_value();
             set_empty(true);
-						unlock();
+						unlock(0);
         }
     }
     
     void clear() noexcept {
+				lock(0);
         if(!empty()) {
             destroy_value();
         }
         
+				lock(1);
         m_neighborhood_infos = 0;
+				unlock(1);
         tsl_assert(empty());
+				unlock(0);
     }
     
     static std::size_t max_size() noexcept {
@@ -1450,8 +1464,12 @@ private:
                 
                 // Empty bucket is in range of NeighborhoodSize, use it
                 if(ibucket_empty - ibucket_for_hash < NeighborhoodSize) {
+        						tsl_assert(ibucket_empty >= ibucket_for_hash );
+        						tsl_assert(m_buckets[ibucket_empty].empty());
+										m_buckets[ibucket_empty].lock(0);
                     auto it = insert_in_bucket(ibucket_empty, ibucket_for_hash, 
                                                hash, std::forward<Args>(value_type_args)...);
+										m_buckets[ibucket_empty].unlock(0);
                     return std::make_pair(iterator(it, m_buckets.end(), m_overflow_elements.begin()), true);
                 }
             }
@@ -1504,7 +1522,7 @@ private:
     std::size_t find_empty_bucket(std::size_t ibucket_start) const {
         const std::size_t limit = std::min(ibucket_start + MAX_PROBES_FOR_EMPTY_BUCKET, m_buckets.size());
         for(; ibucket_start < limit; ibucket_start++) {
-            if(m_buckets[ibucket_start].empty()) {
+            if(m_buckets[ibucket_start].empty() && m_buckets[ibucket_start].isBusy(0) == false) {
                 return ibucket_start;
             }
         }
@@ -1523,6 +1541,7 @@ private:
     {
         tsl_assert(ibucket_empty >= ibucket_for_hash );
         tsl_assert(m_buckets[ibucket_empty].empty());
+			
         m_buckets[ibucket_empty].set_value_of_empty_bucket(hopscotch_bucket::truncate_hash(hash), std::forward<Args>(value_type_args)...);
         
         tsl_assert(!m_buckets[ibucket_for_hash].empty());
