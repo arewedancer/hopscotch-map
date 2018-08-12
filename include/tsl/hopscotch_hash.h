@@ -660,6 +660,7 @@ public:
             m_first_or_empty_bucket = m_buckets.data();
 				}
 
+				//TODO: new?
 				_lock = ::new std::atomic<bool>[bucket_count];
 				std::fill(_lock, _lock+bucket_count, false);
 				_rehash = false; 
@@ -1727,8 +1728,10 @@ private:
 
 		template<class K>
 			hopscotch_bucket* find_in_buckets(const K& key, std::size_t hash, hopscotch_bucket* bucket_for_hash) {   
+				lock(hash);
 				const hopscotch_bucket* bucket_found = 
 					static_cast<const hopscotch_hash*>(this)->find_in_buckets(key, hash, bucket_for_hash); 
+				unlock(hash);
 				return const_cast<hopscotch_bucket*>(bucket_found);
 			}
 
