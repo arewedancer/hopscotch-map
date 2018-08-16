@@ -516,6 +516,7 @@ private:
 
 		std::atomic<bool> *_lock;
 		std::atomic<bool> _rehash;
+		std::atomic<bool> _overflow;;
     
 public:    
     /**
@@ -664,6 +665,7 @@ public:
 				_lock = ::new std::atomic<bool>[bucket_count];
 				std::fill(_lock, _lock+bucket_count, false);
 				_rehash = false; 
+				_overflow = false; 
 
 				this->max_load_factor(max_load_factor);
 		}
@@ -700,6 +702,7 @@ public:
 		_lock = ::new std::atomic<bool>[bucket_count];
 		std::fill(_lock, _lock+bucket_count, false);
 		_rehash = false;
+		_overflow = false;
 		this->max_load_factor(max_load_factor);
 	}
 
@@ -719,6 +722,7 @@ public:
 				delete[] _lock; _lock = ::new std::atomic<bool>[other.m_buckets.size()];
 				std::fill(_lock, _lock+other.m_buckets.size(), false);
 				_rehash = false;
+				_overflow = false;
 			}
 
 		hopscotch_hash(hopscotch_hash&& other) 
@@ -753,6 +757,7 @@ public:
 				  delete[] _lock; _lock = ::new std::atomic<bool>[other.m_buckets.size()];
 					std::fill(_lock, _lock+other.m_buckets.size(), false);
 					_rehash = false;
+					_overflow = false;
 				}
 
 		hopscotch_hash& operator=(const hopscotch_hash& other) {
@@ -772,6 +777,7 @@ public:
 				delete[] _lock; _lock = ::new std::atomic<bool>[other.m_buckets.size()];
 				std::fill(_lock, _lock+other.m_buckets.size(), false);
 				_rehash = false;
+				_overflow = false;
 			}
 
 			return *this;
@@ -780,6 +786,8 @@ public:
 		hopscotch_hash& operator=(hopscotch_hash&& other) {
 			other.swap(*this);
 			other.clear();
+			_rehash = false;
+			_overflow = false;
 
 			return *this;
 		}
@@ -1310,6 +1318,7 @@ private:
 		template<typename U = value_type, 
 			typename std::enable_if<std::is_nothrow_move_constructible<U>::value>::type* = nullptr>
 				void rehash_impl(size_type count_) {
+					std::cout << "rehashing..." << std::endl;
 					hopscotch_hash new_map = new_hopscotch_hash(count_);
 
 					if(!m_overflow_elements.empty()) {
@@ -1480,12 +1489,16 @@ private:
 				const std::size_t ibucket_for_hash = bucket_for_hash(hash);
 
 				// Check if already presents
+				lock(hash);
 				auto it_find = find_impl(KeySelect()(value), hash, m_first_or_empty_bucket + ibucket_for_hash);
 				if(it_find != end()) {
+					unlock(hash);
 					return std::make_pair(it_find, false);
 				}
-
-				return insert_impl(ibucket_for_hash, hash, std::forward<P>(value));
+				auto it = insert_impl(ibucket_for_hash, hash, std::forward<P>(value));
+				unlock(hash);
+				return it;
+				//return insert_impl(ibucket_for_hash, hash, std::forward<P>(value));
 			}
 
 		template<typename... Args>
@@ -1517,7 +1530,11 @@ private:
 
 				// Load factor is too low or a rehash will not change the neighborhood, put the value in overflow list
 				if(size() < m_min_load_threshold_rehash || !will_neighborhood_change_on_rehash(ibucket_for_hash)) {
+					std::cout << "overflow hash= " << hash << std::endl;
+
+					while(std::atomic_exchange_explicit(&_overflow, true, std::memory_order_acquire));
 					auto it = insert_in_overflow(ibucket_for_hash, std::forward<Args>(value_type_args)...);
+					std::atomic_store_explicit(&_overflow, false, std::memory_order_release);
 					return std::make_pair(iterator(m_buckets.end(), m_buckets.end(), it), true);
 				}
 
@@ -1591,6 +1608,7 @@ private:
 
 		template<class... Args, class U = OverflowContainer, typename std::enable_if<!has_key_compare<U>::value>::type* = nullptr>
 			iterator_overflow insert_in_overflow(std::size_t ibucket_for_hash, Args&&... value_type_args) {
+				std::cout << "overflowing..." <<std::endl;
 				auto it = m_overflow_elements.emplace(m_overflow_elements.end(), std::forward<Args>(value_type_args)...);
 
 				m_buckets[ibucket_for_hash].set_overflow(true);
@@ -1726,12 +1744,13 @@ private:
 				return const_iterator(m_buckets.cend(), m_buckets.cend(), find_in_overflow(key));
 			}
 
+		//TODO: need to test lookup performance
 		template<class K>
 			hopscotch_bucket* find_in_buckets(const K& key, std::size_t hash, hopscotch_bucket* bucket_for_hash) {   
-				lock(hash);
+				//lock(hash);
 				const hopscotch_bucket* bucket_found = 
 					static_cast<const hopscotch_hash*>(this)->find_in_buckets(key, hash, bucket_for_hash); 
-				unlock(hash);
+				//unlock(hash);
 				return const_cast<hopscotch_bucket*>(bucket_found);
 			}
 
